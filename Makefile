@@ -15,3 +15,4 @@ deploy:
 		--wasmer-registry https://registry.wasmer.io \
 		--wasmer-app-owner wasmer-examples \
 		--wasmer-app-name python-fastapi-websockets
+		--skip-prepare
