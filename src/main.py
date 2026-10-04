@@ -1,61 +1,70 @@
-from fastapi import FastAPI, WebSocket
-from fastapi.responses import HTMLResponse
-import os
+import asyncio
+import socket
+from uuid import UUID
 
-app = FastAPI(title="FastAPI WebSocket Echo")
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
-def load_html_template():
-    """
-    Load and build the index.html template.
+UID = UUID("86f7d2f9-f9d8-40be-9a70-f5427d0ac5a5").bytes
 
-    Reads the HTML and JS files, and injects the JS into the HTML.
-    """
+app = FastAPI()
+
+
+@app.get("/")
+async def index():
+    return {"status": "ok"}
+
+
+@app.websocket("/ws")
+async def vless(ws: WebSocket):
+    await ws.accept()
+    writer = None
     try:
-        base_dir = os.path.dirname(__file__)
-        html_path = os.path.join(base_dir, "tpl/index.html")
-        js_path = os.path.join(base_dir, "tpl/code.js")
-        print(f"Loading HTML template from: {html_path}")
-        with open(html_path, "r") as f:
-            html = f.read()
-        with open(js_path, "r") as f:
-            js_code = f.read()
+        d = await ws.receive_bytes()
+        if d[1:17] != UID:
+            return await ws.close()
+        i = 18 + d[17]
+        if d[i] != 1:  # TCP only
+            return await ws.close()
+        port = int.from_bytes(d[i + 1:i + 3], "big")
+        i += 3
+        t = d[i]
+        i += 1
+        if t == 1:
+            host = socket.inet_ntoa(d[i:i + 4])
+            i += 4
+        elif t == 2:
+            n = d[i]
+            host = d[i + 1:i + 1 + n].decode()
+            i += 1 + n
+        elif t == 3:
+            host = socket.inet_ntop(socket.AF_INET6, d[i:i + 16])
+            i += 16
+        else:
+            return await ws.close()
 
-        # Replace placeholder with embedded JS code tag
-        injected = html.replace(
-            "<!-- JS_PLACEHOLDER -->",
-            f"<script>\n{js_code}\n</script>"
-        )
-        return injected
-    except Exception as e:
-        print(f"Error loading HTML template: {e}")
-        return "<!DOCTYPE html><html><body>ERROR: Could not load index.html template!</body></html>"
+        reader, writer = await asyncio.open_connection(host, port)
+        writer.write(d[i:])
+        await writer.drain()
+        await ws.send_bytes(b"\x00\x00")
 
-ROOT_HTML = load_html_template()
+        async def up():
+            while True:
+                writer.write(await ws.receive_bytes())
+                await writer.drain()
 
+        async def down():
+            while True:
+                b = await reader.read(16384)
+                if not b:
+                    break
+                await ws.send_bytes(b)
 
-@app.get("/", response_class=HTMLResponse, include_in_schema=False)
-async def root() -> str:
-    return ROOT_HTML
-
-
-@app.websocket("/api/ws")
-async def websocket_endpoint(websocket: WebSocket):
-    MAX_LEN = 500
-    await websocket.accept()
-    try:
-        while True:
-            data = await websocket.receive_text()
-            # Enforce max length of 500 characters on server as well
-            if len(data) > MAX_LEN:
-                data = data[:MAX_LEN]
-            # Echo back exactly what was sent so client can measure RTT
-            await websocket.send_text(data)
-    except Exception:
-        # Connection closed or errored; exit gracefully
+        tasks = [asyncio.create_task(up()), asyncio.create_task(down())]
+        await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        for x in tasks:
+            x.cancel()
+    except (WebSocketDisconnect, Exception):
         pass
-
-
-if __name__ == "__main__":
-    import uvicorn
-
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    finally:
+        if writer:
+            writer.close()
