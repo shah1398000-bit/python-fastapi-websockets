@@ -1,0 +1,6 @@
+kind: wasmer.io/App.v0
+name: aether
+owner: shah1398000-bit
+locality:
+  regions:
+    - fr-roub1
